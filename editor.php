@@ -545,7 +545,7 @@ function showPreview() {
 
     document.getElementById('dfe-preview-content').innerHTML = html;
     document.getElementById('dfe-edit-view').style.display   = 'none';
-    document.getElementById('dfe-preview').style.display     = '';
+    document.getElementById('dfe-preview').style.display     = 'block';
 
     // payload を hidden フォームに保持
     const payload = { updates, deletes, adds };
