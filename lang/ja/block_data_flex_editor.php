@@ -15,8 +15,8 @@ $string['role_fixed']   = '固定列（直接編集）';
 $string['role_move']    = '移動列（D&Dで入れ替え）';
 $string['role_sort']    = '初期ソートキー';
 $string['role_seq']     = '連番フィールド（振り直し対象）';
-$string['role_group']   = 'グループフィールド（区分別カウント）';
-$string['role_seqsort'] = '連番ソートキー（振り直し時の並び順）';
+$string['role_group']   = 'グループフィールド（区分）';
+$string['role_seqsort'] = '連番ソート順位';
 $string['role_none']    = '使用しない';
 
 // テキスト設定
@@ -58,3 +58,13 @@ $string['nofields']       = 'フィールドが見つかりませんでした。
 $string['invalidinstance'] = 'このブロックはこのコースに配置されたものではありません。';
 $string['invaliddataid']   = 'データベースIDがブロックの設定と一致しません。';
 $string['invalidentry']    = '自分が作成したエントリ以外、または別のデータベースのエントリが含まれているため保存できませんでした。';
+$string['role_sort_help']      = 'エディタを開いたときの並び順に使うフィールド。表示しない列でも指定できます（例：通し番号）。';
+$string['role_seq_help']       = '「連番を振り直す」で 001, 002, … を全体の時系列順に書き込むフィールド。';
+$string['role_group_help']     = '区分別連番のグループ分けに使うフィールド（読み取りのみ）。値をそのまま区分として扱い、「講義・実習」は「講義」「実習」とは別系列で数えます。';
+$string['role_groupseq']       = '区分別連番フィールド（振り直し対象）';
+$string['role_groupseq_help']  = '「連番を振り直す」で、区分ごとに 001, 002, … を書き込むフィールド。区分フィールドの指定が必要です。';
+$string['role_seqsort_help']   = '連番ソートキー：振り直し時の並び順。1, 2, … の順に優先します（例：実施日=1、時間=2）。空欄は使用しません。表示の役割と同時に指定できます。';
+$string['section_display']     = '表示と並び順';
+$string['section_special']     = '連番・ソートの設定';
+$string['groupseq_needs_group'] = '区分別連番フィールドを使うには、グループフィールド（区分）も指定してください。';
+$string['seq_same_field']      = '連番フィールドと区分別連番フィールドに同じフィールドが指定されています。';

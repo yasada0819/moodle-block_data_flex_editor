@@ -36,6 +36,7 @@ $moveFieldsCsv   = $blockcfg->move_fields     ?? '';
 $sortField       = trim($blockcfg->sort_field      ?? '');
 $seqField        = trim($blockcfg->seq_field       ?? '');
 $groupField      = trim($blockcfg->group_field     ?? '');
+$groupSeqField   = trim($blockcfg->group_seq_field ?? '');
 $seqSortFieldsCsv = $blockcfg->seq_sort_fields ?? '';
 $textformat      = isset($blockcfg->textformat) ? (int)$blockcfg->textformat : FORMAT_PLAIN;
 $minrows         = isset($blockcfg->minrows)    ? (int)$blockcfg->minrows    : 2;
@@ -47,7 +48,8 @@ $allFields    = array_merge($fixedFields, $moveFields);
 
 $renumberCfg = [
     'seqField'   => $seqField,
-    'groupField' => $groupField,
+    'groupField'    => $groupField,
+    'groupSeqField' => $groupSeqField,
     'sortFields' => $seqSortFields,
 ];
 
@@ -96,7 +98,7 @@ $jsConfig = json_encode([
     'moveFields'  => $moveFields,
     'sortField'   => $sortField,
     'seqField'    => $seqField,
-    'hasRenumber' => !empty($seqField),
+    'hasRenumber' => !empty($seqField) || ($groupSeqField !== '' && $groupField !== ''),
     'saveUrl'     => (new moodle_url('/blocks/data_flex_editor/editor.php'))->out(false),
     'sesskey'     => sesskey(),
     'minrows'     => $minrows,
