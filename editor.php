@@ -27,7 +27,9 @@ $PAGE->set_heading($course->fullname);
 list($blockinstance, $blockcfg) = block_data_flex_editor_get_instance($instanceid, $courseid);
 
 // URL の dataid がブロック設定の対象データベースと一致することを確認
-if (empty($blockcfg->dataid) || (int)$blockcfg->dataid !== $dataid) {
+// かつ、そのデータベースがこのコースのものであることを確認
+if (empty($blockcfg->dataid) || (int)$blockcfg->dataid !== $dataid
+        || !$DB->record_exists('data', ['id' => $dataid, 'course' => $courseid])) {
     throw new moodle_exception('invaliddataid', 'block_data_flex_editor');
 }
 
@@ -36,6 +38,7 @@ $moveFieldsCsv   = $blockcfg->move_fields     ?? '';
 $sortField       = trim($blockcfg->sort_field      ?? '');
 $seqField        = trim($blockcfg->seq_field       ?? '');
 $groupField      = trim($blockcfg->group_field     ?? '');
+$groupSeqField   = trim($blockcfg->group_seq_field ?? '');
 $seqSortFieldsCsv = $blockcfg->seq_sort_fields ?? '';
 $textformat      = isset($blockcfg->textformat) ? (int)$blockcfg->textformat : FORMAT_PLAIN;
 $minrows         = isset($blockcfg->minrows)    ? (int)$blockcfg->minrows    : 2;
@@ -47,7 +50,8 @@ $allFields    = array_merge($fixedFields, $moveFields);
 
 $renumberCfg = [
     'seqField'   => $seqField,
-    'groupField' => $groupField,
+    'groupField'    => $groupField,
+    'groupSeqField' => $groupSeqField,
     'sortFields' => $seqSortFields,
 ];
 
@@ -76,8 +80,16 @@ if ($action === 'save' && confirm_sesskey()) {
     );
 }
 
+// 連番の予測表示に使うフィールド（表示列に含まれないものは extra として別に渡す）
+$hasRenumber = !empty($seqField) || ($groupSeqField !== '' && $groupField !== '');
+$seqRelated  = array_values(array_unique(array_filter(array_merge(
+    $seqSortFields, [$groupField, $seqField, $groupSeqField]
+), fn($f) => $f !== '' && isset($fmeta[$f]))));
+$extraFields = array_values(array_diff($seqRelated, $allFields));
+
 // エントリ取得
-$entries = block_data_flex_editor_get_entries($dataid, $USER->id, $sortField, $allFields);
+$entries = block_data_flex_editor_get_entries($dataid, $USER->id, $sortField,
+    array_merge($allFields, $extraFields));
 
 // menu型の選択肢をまとめて取得
 $menuOptions = [];
@@ -96,7 +108,13 @@ $jsConfig = json_encode([
     'moveFields'  => $moveFields,
     'sortField'   => $sortField,
     'seqField'    => $seqField,
-    'hasRenumber' => !empty($seqField),
+    'hasRenumber' => $hasRenumber,
+    'seq'         => [
+        'seqField'      => isset($fmeta[$seqField]) ? $seqField : '',
+        'groupField'    => isset($fmeta[$groupField]) ? $groupField : '',
+        'groupSeqField' => ($groupField !== '' && isset($fmeta[$groupSeqField])) ? $groupSeqField : '',
+        'sortFields'    => array_values(array_filter($seqSortFields, fn($f) => isset($fmeta[$f]))),
+    ],
     'saveUrl'     => (new moodle_url('/blocks/data_flex_editor/editor.php'))->out(false),
     'sesskey'     => sesskey(),
     'minrows'     => $minrows,
@@ -106,7 +124,15 @@ $jsConfig = json_encode([
         'add'          => get_string('addrow',    'block_data_flex_editor'),
         'preview'      => get_string('preview',   'block_data_flex_editor'),
         'save'         => get_string('save',      'block_data_flex_editor'),
-        'renumber'     => get_string('renumber',  'block_data_flex_editor'),
+        'renumber'     => $seqSortFields
+            ? get_string('renumber_by', 'block_data_flex_editor', implode('・', $seqSortFields))
+            : get_string('renumber', 'block_data_flex_editor'),
+        'renumberOn'   => get_string('renumber_on',  'block_data_flex_editor'),
+        'renumberOff'  => get_string('renumber_off', 'block_data_flex_editor'),
+        'showAll'      => get_string('showall',      'block_data_flex_editor'),
+        'numChanged'   => get_string('numchanged',   'block_data_flex_editor'),
+        'newRow'       => get_string('newrow',       'block_data_flex_editor'),
+        'deleteCol'    => get_string('deletecol',    'block_data_flex_editor'),
         'modeInsert'   => get_string('modeinsert','block_data_flex_editor'),
         'modeSwap'     => get_string('modeswap',  'block_data_flex_editor'),
         'modeLabel'    => get_string('modelabel', 'block_data_flex_editor'),
@@ -123,8 +149,15 @@ $jsConfig = json_encode([
 // エントリを JS 用配列に変換
 $entriesJs = [];
 foreach ($entries as $eid => $entry) {
-    $row = ['id' => $eid, 'fields' => $entry->fields];
-    $entriesJs[] = $row;
+    $fields = $extra = [];
+    foreach ($entry->fields as $fname => $val) {
+        if (in_array($fname, $allFields, true)) {
+            $fields[$fname] = $val;
+        } else {
+            $extra[$fname] = $val;
+        }
+    }
+    $entriesJs[] = ['id' => (int)$eid, 'fields' => (object)$fields, 'extra' => (object)$extra];
 }
 $entriesJson = json_encode($entriesJs);
 
@@ -177,6 +210,17 @@ echo $OUTPUT->heading(get_string('pluginname', 'block_data_flex_editor'));
 #dfe-preview .deleted { background: #fdecea; }
 .diff-old { color: #999; text-decoration: line-through; font-size: 0.85em; display: block; }
 .diff-new { color: #155724; font-weight: bold; display: block; }
+.num-col  { background: #f0f0f0 !important; text-align: center; font-family: monospace;
+            white-space: nowrap; color: #333; }
+.num-col.num-changed { background: #fff3cd !important; font-weight: bold; color: #8a5a00; }
+.dfe-table th.num-th { background: #555; }
+.dfe-renumber-bar { margin: 0.25rem 0 0.75rem; padding: 6px 10px; background: #f5f8fc;
+                    border: 1px solid #d6e2f0; border-radius: 4px; display: inline-block; }
+.dfe-renumber-bar input { margin-right: 4px; }
+#dfe-preview .new-row { background: #e8f5e9; }
+#dfe-preview .num-only { background: #fffbe8; }
+#dfe-preview tr.deleted td { text-decoration: line-through; color: #999; }
+.dfe-preview-status { margin: 0.25rem 0 0.75rem; font-size: 0.9rem; }
 </style>
 
 <div id="dfe-app">
@@ -187,6 +231,9 @@ echo $OUTPUT->heading(get_string('pluginname', 'block_data_flex_editor'));
       <button class="dfe-mode-btn active" id="dfe-mode-insert"></button>
       <button class="dfe-mode-btn"        id="dfe-mode-swap"></button>
     </div>
+    <label class="dfe-renumber-bar" id="dfe-renumber-wrap" style="display:none;">
+      <input type="checkbox" id="dfe-renumber-cb" checked> <span id="dfe-renumber-label"></span>
+    </label>
     <div style="overflow-x:auto;">
       <table class="dfe-table" id="dfe-table">
         <thead id="dfe-thead"></thead>
@@ -202,12 +249,13 @@ echo $OUTPUT->heading(get_string('pluginname', 'block_data_flex_editor'));
   <!-- プレビュービュー -->
   <div id="dfe-preview">
     <h4 id="dfe-preview-title"></h4>
+    <div class="dfe-preview-status" id="dfe-preview-status"></div>
+    <label style="display:block; margin-bottom:0.5rem;">
+      <input type="checkbox" id="dfe-showall-cb"> <span id="dfe-showall-label"></span>
+    </label>
     <div id="dfe-preview-content"></div>
     <div style="margin-top:1rem; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
       <button class="btn btn-secondary" id="dfe-back-btn"></button>
-      <label id="dfe-renumber-wrap" style="display:none;">
-        <input type="checkbox" id="dfe-renumber-cb"> <span id="dfe-renumber-label"></span>
-      </label>
       <button class="btn btn-success" id="dfe-save-btn"></button>
     </div>
   </div>
@@ -238,6 +286,7 @@ function init() {
         id:           e.id,
         original:     JSON.parse(JSON.stringify(e.fields)),
         fields:       JSON.parse(JSON.stringify(e.fields)),
+        extra:        e.extra || {},
         isNew:        false,
         markedDelete: false,
     }));
@@ -255,6 +304,7 @@ function init() {
         document.getElementById('dfe-renumber-wrap').style.display = '';
         document.getElementById('dfe-renumber-label').textContent = L.renumber;
     }
+    document.getElementById('dfe-showall-label').textContent = L.showAll;
 
     renderHeader();
     renderBody();
@@ -267,13 +317,16 @@ function renderHeader() {
     let html = '<tr>'
         + '<th></th>'   // ドラッグハンドル
         + '<th>↕</th>'; // ↑↓ボタン
+    numCols().forEach(f => {
+        html += `<th class="num-th">${escHtml(f)}</th>`;
+    });
     CFG.fixedFields.forEach(f => {
         html += `<th>${escHtml(f)}</th>`;
     });
     CFG.moveFields.forEach(f => {
         html += `<th style="background:#2a6099;">${escHtml(f)}</th>`;
     });
-    html += '<th>削除</th></tr>';
+    html += `<th>${escHtml(L.deleteCol)}</th></tr>`;
     thead.innerHTML = html;
 }
 
@@ -284,6 +337,7 @@ function renderBody() {
     rows.forEach((row, idx) => {
         tbody.appendChild(makeRow(row, idx));
     });
+    updateNumbers();
 }
 
 function makeRow(row, idx) {
@@ -312,6 +366,14 @@ function makeRow(row, idx) {
     moveTd.appendChild(upBtn);
     moveTd.appendChild(downBtn);
     tr.appendChild(moveTd);
+
+    // 連番（読み取り専用・予測表示）
+    numCols().forEach(fname => {
+        const td = document.createElement('td');
+        td.className = 'num-col';
+        td.dataset.numField = fname;
+        tr.appendChild(td);
+    });
 
     // 固定列
     CFG.fixedFields.forEach(fname => {
@@ -364,7 +426,7 @@ function makeFieldInput(row, fname, readonly) {
             if (o === val) opt.selected = true;
             sel.appendChild(opt);
         });
-        sel.addEventListener('change', () => { row.fields[fname] = sel.value; });
+        sel.addEventListener('change', () => { row.fields[fname] = sel.value; onFieldChanged(fname); });
         return sel;
     }
 
@@ -373,7 +435,7 @@ function makeFieldInput(row, fname, readonly) {
         inp.type  = 'date';
         inp.className = 'dfe-input';
         inp.value = val;
-        inp.addEventListener('change', () => { row.fields[fname] = inp.value; });
+        inp.addEventListener('change', () => { row.fields[fname] = inp.value; onFieldChanged(fname); });
         return inp;
     }
 
@@ -383,6 +445,7 @@ function makeFieldInput(row, fname, readonly) {
         ta.rows = CFG.minrows;
         ta.value = val;
         ta.addEventListener('input', () => { row.fields[fname] = ta.value; });
+        ta.addEventListener('change', () => onFieldChanged(fname));
         return ta;
     }
 
@@ -392,6 +455,7 @@ function makeFieldInput(row, fname, readonly) {
     inp.className = 'dfe-input';
     inp.value = val;
     inp.addEventListener('input', () => { row.fields[fname] = inp.value; });
+    inp.addEventListener('change', () => onFieldChanged(fname));
     return inp;
 }
 
@@ -483,67 +547,210 @@ function addRow() {
     renderBody();
 }
 
+// ===== 連番の予測 =====
+// サーバー側 block_data_flex_editor_renumber() と同じ規則で計算する：
+//   ・削除予定の行は除外
+//   ・連番ソートキー順（date/number は数値、空は末尾。両方数値なら数値比較、それ以外は自然順）
+//   ・同順位は record id 順（新規行は既存行の後ろ、追加順）
+//   ・区分はそのままの値でグループ化（前後の空白は除去）
+function numCols() {
+    const out = [];
+    if (CFG.seq.seqField)      out.push(CFG.seq.seqField);
+    if (CFG.seq.groupSeqField) out.push(CFG.seq.groupSeqField);
+    return out;
+}
+
+function renumberOn() {
+    const cb = document.getElementById('dfe-renumber-cb');
+    return CFG.hasRenumber && cb && cb.checked;
+}
+
+function valueOf(row, fname) {
+    if (Object.prototype.hasOwnProperty.call(row.fields, fname)) return row.fields[fname] ?? '';
+    return (row.extra && row.extra[fname]) ?? '';
+}
+
+function currentNum(row, fname) {
+    if (row.isNew) return '';
+    if (row.original && Object.prototype.hasOwnProperty.call(row.original, fname)) {
+        return row.original[fname] ?? '';
+    }
+    return (row.extra && row.extra[fname]) ?? '';
+}
+
+function isNumeric(v) { return v !== '' && !isNaN(v) && !isNaN(parseFloat(v)); }
+
+function cmpVal(va, vb, ftype) {
+    if (va === '' && vb !== '') return 1;
+    if (vb === '' && va !== '') return -1;
+    if (va === '' && vb === '') return 0;
+    if (ftype === 'number' || (isNumeric(va) && isNumeric(vb))) {
+        return parseFloat(va) - parseFloat(vb);
+    }
+    // date は YYYY-MM-DD 文字列なので文字列比較で日付順になる
+    return String(va).localeCompare(String(vb), 'ja', { numeric: true, sensitivity: 'base' });
+}
+
+/** @return Map(row => {fieldName: '001', ...}) */
+function predictNumbers() {
+    const result = new Map();
+    const live = rows.filter(r => !r.markedDelete);
+    const order = live.map((r, i) => ({ r, i }));
+    const types = CFG.fieldTypes;
+    order.sort((a, b) => {
+        for (const f of CFG.seq.sortFields) {
+            const c = cmpVal(String(valueOf(a.r, f)), String(valueOf(b.r, f)), types[f] || 'text');
+            if (c !== 0) return c;
+        }
+        // 同順位：既存行は record id 順、新規行はその後ろに追加順
+        if (!a.r.isNew && !b.r.isNew) return a.r.id - b.r.id;
+        if (a.r.isNew !== b.r.isNew) return a.r.isNew ? 1 : -1;
+        return a.i - b.i;
+    });
+    let seq = 0;
+    const grp = {};
+    order.forEach(({ r }) => {
+        const nums = {};
+        if (CFG.seq.seqField) nums[CFG.seq.seqField] = String(++seq).padStart(3, '0');
+        if (CFG.seq.groupSeqField) {
+            const g = String(valueOf(r, CFG.seq.groupField)).trim();
+            grp[g] = (grp[g] || 0) + 1;
+            nums[CFG.seq.groupSeqField] = String(grp[g]).padStart(3, '0');
+        }
+        result.set(r, nums);
+    });
+    return result;
+}
+
+/** 表示する番号（オン：予測値／オフ：現在値）と、変わるかどうか */
+function numbersFor(row, predicted) {
+    const out = {};
+    numCols().forEach(f => {
+        const cur = currentNum(row, f);
+        if (renumberOn() && !row.markedDelete) {
+            const nv = predicted.get(row)?.[f] ?? '';
+            out[f] = { cur, next: nv, changed: nv !== cur };
+        } else {
+            out[f] = { cur, next: cur, changed: false };
+        }
+    });
+    return out;
+}
+
+function updateNumbers() {
+    if (numCols().length === 0) return;
+    const predicted = predictNumbers();
+    document.querySelectorAll('#dfe-tbody tr').forEach(tr => {
+        const row = rows[parseInt(tr.dataset.idx)];
+        if (!row) return;
+        const nums = numbersFor(row, predicted);
+        tr.querySelectorAll('td.num-col').forEach(td => {
+            const n = nums[td.dataset.numField];
+            td.textContent = n.next !== '' ? n.next : '—';
+            td.classList.toggle('num-changed', n.changed);
+            td.title = n.changed ? `${n.cur || '—'} → ${n.next}` : '';
+        });
+    });
+}
+
+function onFieldChanged(fname) {
+    if (CFG.seq.sortFields.includes(fname) || fname === CFG.seq.groupField) {
+        updateNumbers();
+    }
+}
+
 // ===== プレビュー =====
 function showPreview() {
     const updates = [], deletes = [], adds = [];
+    const predicted = predictNumbers();
+    const nc = numCols();
+    const on = renumberOn();
 
-    rows.forEach(row => {
+    // 行ごとの状態を判定
+    const info = rows.map(row => {
+        const nums = numbersFor(row, predicted);
+        const numChanged = nc.some(f => nums[f].changed);
+        let state = 'same';
         if (row.markedDelete && !row.isNew) {
+            state = 'deleted';
             deletes.push({ entryId: row.id });
-            return;
-        }
-        if (row.markedDelete && row.isNew) return; // 追加してすぐ削除は無視
-
-        if (row.isNew) {
+        } else if (row.markedDelete && row.isNew) {
+            state = 'skip'; // 追加してすぐ削除は無視
+        } else if (row.isNew) {
+            state = 'added';
             adds.push({ current: row.fields });
-            return;
+        } else {
+            const changed = Object.keys(row.fields).some(
+                k => row.fields[k] !== (row.original[k] ?? '')
+            );
+            if (changed) {
+                state = 'changed';
+                updates.push({ entryId: row.id, original: row.original, current: row.fields });
+            } else if (numChanged) {
+                state = 'numonly';
+            }
         }
-
-        // 変更チェック
-        const changed = Object.keys(row.fields).some(
-            k => row.fields[k] !== (row.original[k] ?? '')
-        );
-        if (changed) {
-            updates.push({ entryId: row.id, original: row.original, current: row.fields });
-        }
+        return { row, nums, state };
     });
 
     const allCols = CFG.fixedFields.concat(CFG.moveFields);
+    const header  = nc.concat(allCols);
+    const numCells = (x, mode) => nc.map(f => {
+        const n = x.nums[f];
+        if (mode === 'deleted') return escHtml(n.cur);
+        if (mode === 'added')   return escHtml(n.next || '—');
+        return diffCell(n.cur, n.next);
+    });
+    const fieldCells = (x, mode) => allCols.map(f => {
+        if (mode === 'deleted') return escHtml(x.row.original?.[f] ?? '');
+        if (mode === 'added')   return escHtml(x.row.fields[f] ?? '');
+        return diffCell(x.row.original?.[f] ?? '', x.row.fields[f] ?? '');
+    });
+    const label = x => x.row.isNew ? L.newRow : `ID ${x.row.id}`;
+    const toDef = (x, mode, cls) => ({
+        label: label(x), cols: numCells(x, mode).concat(fieldCells(x, mode)), cls,
+    });
 
+    // 振り直しの状態表示
+    document.getElementById('dfe-preview-status').textContent =
+        CFG.hasRenumber ? (on ? L.renumberOn : L.renumberOff) : '';
+
+    const showAll = document.getElementById('dfe-showall-cb').checked;
     let html = '';
-    if (updates.length === 0 && deletes.length === 0 && adds.length === 0) {
-        html = `<p>${L.nochanges}</p>`;
+
+    if (showAll) {
+        // 全件：保存後の並び（振り直しオンなら予測した通番順、オフなら現在の行順）
+        let list = info.filter(x => x.state !== 'skip' && x.state !== 'deleted');
+        if (on && CFG.seq.seqField) {
+            list.sort((a, b) => (a.nums[CFG.seq.seqField].next).localeCompare(b.nums[CFG.seq.seqField].next));
+        }
+        const cls = { changed: 'changed', added: 'new-row', numonly: 'num-only', same: '' };
+        const defs = list.map(x => toDef(x, x.state === 'added' ? 'added' : 'diff', cls[x.state]));
+        info.filter(x => x.state === 'deleted').forEach(x => defs.push(toDef(x, 'deleted', 'deleted')));
+        html = buildPreviewTable(defs, header);
     } else {
-        // 変更
-        if (updates.length > 0) {
-            html += `<h5>${L.changed}（${updates.length}件）</h5>`;
-            html += buildPreviewTable(updates.map(u => ({
-                label: `ID ${u.entryId}`,
-                cols:  allCols.map(f => diffCell(u.original[f] ?? '', u.current[f] ?? '')),
-                cls:   'changed',
-            })), allCols);
+        const ch = info.filter(x => x.state === 'changed');
+        const no = info.filter(x => x.state === 'numonly');
+        const de = info.filter(x => x.state === 'deleted');
+        const ad = info.filter(x => x.state === 'added');
+        if (!ch.length && !no.length && !de.length && !ad.length) {
+            html = `<p>${L.nochanges}</p>`;
         }
-        // 削除
-        if (deletes.length > 0) {
-            const delRows = deletes.map(d => {
-                const r = rows.find(rr => rr.id === d.entryId);
-                return {
-                    label: `ID ${d.entryId}`,
-                    cols:  allCols.map(f => escHtml(r?.original?.[f] ?? '')),
-                    cls:   'deleted',
-                };
-            });
-            html += `<h5>${L.deleted}（${deletes.length}件）</h5>`;
-            html += buildPreviewTable(delRows, allCols);
+        if (ch.length) {
+            html += `<h5>${L.changed}（${ch.length}件）</h5>`;
+            html += buildPreviewTable(ch.map(x => toDef(x, 'diff', 'changed')), header);
         }
-        // 追加
-        if (adds.length > 0) {
-            html += `<h5>${L.added}（${adds.length}件）</h5>`;
-            html += buildPreviewTable(adds.map((a, i) => ({
-                label: `新規${i + 1}`,
-                cols:  allCols.map(f => escHtml(a.current[f] ?? '')),
-                cls:   '',
-            })), allCols);
+        if (no.length) {
+            html += `<h5>${L.numChanged}（${no.length}件）</h5>`;
+            html += buildPreviewTable(no.map(x => toDef(x, 'diff', 'num-only')), header);
+        }
+        if (de.length) {
+            html += `<h5>${L.deleted}（${de.length}件）</h5>`;
+            html += buildPreviewTable(de.map(x => toDef(x, 'deleted', 'deleted')), header);
+        }
+        if (ad.length) {
+            html += `<h5>${L.added}（${ad.length}件）</h5>`;
+            html += buildPreviewTable(ad.map(x => toDef(x, 'added', 'new-row')), header);
         }
     }
 
@@ -551,9 +758,8 @@ function showPreview() {
     document.getElementById('dfe-edit-view').style.display   = 'none';
     document.getElementById('dfe-preview').style.display     = 'block';
 
-    // payload を hidden フォームに保持
-    const payload = { updates, deletes, adds };
-    window._dfePayload = payload;
+    // payload を保持（番号の書き込みはサーバー側の振り直しで行う）
+    window._dfePayload = { updates, deletes, adds };
 }
 
 function buildPreviewTable(rowDefs, cols) {
@@ -603,6 +809,8 @@ function bindButtons() {
         document.getElementById('dfe-edit-view').style.display = '';
     });
     document.getElementById('dfe-save-btn').addEventListener('click', doSave);
+    document.getElementById('dfe-renumber-cb').addEventListener('change', updateNumbers);
+    document.getElementById('dfe-showall-cb').addEventListener('change', showPreview);
 }
 
 // ===== ユーティリティ =====

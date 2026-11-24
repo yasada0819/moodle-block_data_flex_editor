@@ -6,7 +6,8 @@ defined('MOODLE_INTERNAL') || die();
 // ---------------------------------------------------------------------------
 
 /**
- * ブロックインスタンスを取得し、このプラグインのブロックで、かつ指定コースに
+ * ブロックインスタンスを取得し、このプラグインのブロックで、かつ指定コース内
+ * （コーストップ、またはコース内のモジュールページなど下位コンテキスト）に
  * 配置されたものであることを確認する。
  *
  * URL パラメータの instanceid を別コース・別ブロックのものに差し替えて
@@ -23,8 +24,15 @@ function block_data_flex_editor_get_instance(int $instanceid, int $courseid): ar
     $blockinstance = $DB->get_record('block_instances', ['id' => $instanceid], '*', MUST_EXIST);
     $coursecontext = context_course::instance($courseid);
 
-    if ($blockinstance->blockname !== 'data_flex_editor'
-            || (int)$blockinstance->parentcontextid !== (int)$coursecontext->id) {
+    if ($blockinstance->blockname !== 'data_flex_editor') {
+        throw new moodle_exception('invalidinstance', 'block_data_flex_editor');
+    }
+    $parentcontext = context::instance_by_id($blockinstance->parentcontextid, IGNORE_MISSING);
+    $incourse = $parentcontext && (
+        (int)$parentcontext->id === (int)$coursecontext->id
+        || strpos($parentcontext->path, $coursecontext->path . '/') === 0
+    );
+    if (!$incourse) {
         throw new moodle_exception('invalidinstance', 'block_data_flex_editor');
     }
 
@@ -157,17 +165,21 @@ function block_data_flex_editor_get_entries(
         $result[$rec->id] = $obj;
     }
 
-    // ソート
+    // ソート（ソートキーが表示対象外のフィールドでも DB の生値で並べる）
     if ($sortfield && isset($fm[$sortfield])) {
+        $sfid  = $fm[$sortfield];
         $ftype = $fmeta[$sortfield]->type ?? 'text';
-        uasort($result, function($a, $b) use ($sortfield, $ftype) {
-            $va = $a->fields[$sortfield] ?? '';
-            $vb = $b->fields[$sortfield] ?? '';
+        uasort($result, function($a, $b) use ($cmap, $sfid, $ftype) {
+            $va = $cmap[$a->id][$sfid] ?? '';
+            $vb = $cmap[$b->id][$sfid] ?? '';
             if ($ftype === 'date' || $ftype === 'number') {
-                $na = is_numeric($va) ? (float)$va : PHP_INT_MAX;
-                $nb = is_numeric($vb) ? (float)$vb : PHP_INT_MAX;
+                $na = ($va !== '' && is_numeric($va)) ? (float)$va : PHP_INT_MAX;
+                $nb = ($vb !== '' && is_numeric($vb)) ? (float)$vb : PHP_INT_MAX;
                 return $na <=> $nb;
             }
+            // 空値は末尾へ
+            if ($va === '' && $vb !== '') { return 1; }
+            if ($vb === '' && $va !== '') { return -1; }
             return strnatcasecmp((string)$va, (string)$vb);
         });
     }
@@ -286,7 +298,8 @@ function block_data_flex_editor_save_entries(
     }
 
     // --- 連番振り直し ---
-    if (!empty($payload['renumber']) && !empty($renumberCfg['seqField'])) {
+    if (!empty($payload['renumber'])
+            && (!empty($renumberCfg['seqField']) || !empty($renumberCfg['groupSeqField']))) {
         block_data_flex_editor_renumber($dataid, $userid, $fm, $fmeta, $renumberCfg);
     }
 
@@ -339,24 +352,36 @@ function block_data_flex_editor_write_fields(
 // ---------------------------------------------------------------------------
 
 /**
- * seqField  : 通し番号フィールド名
- * groupField: 区分フィールド名（空なら区分なし）
- * sortFields: ソートキーフィールド名の配列（順に優先）
+ * 連番の振り直し
+ *
+ * cfg:
+ *   seqField      : 全体連番を書き込むフィールド名（空なら書き込まない）
+ *   groupField    : 区分フィールド名（区分別連番のグループ化に使う。読み取りのみ）
+ *   groupSeqField : 区分別連番を書き込むフィールド名（空なら書き込まない。groupField 必須）
+ *   sortFields    : 振り直し時の並び順を決めるフィールド名の配列（先頭ほど優先）
+ *
+ * 区分は値をそのままグループキーとして扱う（例：「講義・実習」は「講義」「実習」とは別系列）。
+ * 区分が空のエントリは「空」という1つの系列として数える。
  */
 function block_data_flex_editor_renumber(
     int $dataid, int $userid, array $fm, array $fmeta, array $cfg
 ): void {
     global $DB;
 
-    $seqField   = $cfg['seqField']   ?? '';
-    $groupField = $cfg['groupField'] ?? '';
-    $sortFields = $cfg['sortFields'] ?? [];
+    $seqField      = $cfg['seqField']      ?? '';
+    $groupField    = $cfg['groupField']    ?? '';
+    $groupSeqField = $cfg['groupSeqField'] ?? '';
+    $sortFields    = $cfg['sortFields']    ?? [];
 
-    if (!$seqField || !isset($fm[$seqField])) {
+    $seqFieldId      = ($seqField && isset($fm[$seqField])) ? $fm[$seqField] : 0;
+    $grpFieldId      = ($groupField && isset($fm[$groupField])) ? $fm[$groupField] : 0;
+    $groupSeqFieldId = ($groupSeqField && isset($fm[$groupSeqField]) && $grpFieldId)
+        ? $fm[$groupSeqField] : 0;
+
+    if (!$seqFieldId && !$groupSeqFieldId) {
         return;
     }
 
-    // 全エントリのソートキー値を取得
     $records = $DB->get_records('data_records', [
         'dataid' => $dataid,
         'userid' => $userid,
@@ -386,52 +411,52 @@ function block_data_flex_editor_renumber(
             }
             $raw   = $cmap[$rid][$fm[$sf]] ?? '';
             $ftype = $fmeta[$sf]->type ?? 'text';
-            // date型はタイムスタンプのまま数値比較
-            $row[$sf] = ($ftype === 'date' || $ftype === 'number') ? (int)$raw : $raw;
+            // date型・number型は数値比較（空は末尾）
+            if ($ftype === 'date' || $ftype === 'number') {
+                $row[$sf] = ($raw !== '' && is_numeric($raw)) ? (int)$raw : PHP_INT_MAX;
+            } else {
+                $row[$sf] = $raw;
+            }
         }
-        if ($groupField && isset($fm[$groupField])) {
-            $row['_group'] = $cmap[$rid][$fm[$groupField]] ?? '';
-        } else {
-            $row['_group'] = '';
-        }
-        $sortData[$rid] = $row;
+        $row['_group'] = $grpFieldId ? trim((string)($cmap[$rid][$grpFieldId] ?? '')) : '';
+        $sortData[] = $row;
     }
 
-    // ソート実行
+    // ソート実行（同順位は record id 順で安定させる）
     usort($sortData, function($a, $b) use ($sortFields) {
         foreach ($sortFields as $sf) {
             $va = $a[$sf] ?? '';
             $vb = $b[$sf] ?? '';
-            $cmp = is_numeric($va) && is_numeric($vb)
-                ? $va <=> $vb
-                : strnatcasecmp((string)$va, (string)$vb);
+            if (is_int($va) && is_int($vb)) {
+                $cmp = $va <=> $vb;
+            } else {
+                if ($va === '' && $vb !== '') { return 1; }
+                if ($vb === '' && $va !== '') { return -1; }
+                $cmp = strnatcasecmp((string)$va, (string)$vb);
+            }
             if ($cmp !== 0) {
                 return $cmp;
             }
         }
-        return 0;
+        return $a['_id'] <=> $b['_id'];
     });
 
     // 採番
     $seqCounter   = 1;
     $groupCounter = [];
-    $seqFieldId   = $fm[$seqField];
-    $grpFieldId   = $groupField && isset($fm[$groupField]) ? $fm[$groupField] : 0;
 
     foreach ($sortData as $row) {
-        $rid   = $row['_id'];
-        $group = $row['_group'];
+        $rid = $row['_id'];
 
-        $seqVal = sprintf('%03d', $seqCounter++);
-        block_data_flex_editor_upsert_content($rid, $seqFieldId, $seqVal);
+        if ($seqFieldId) {
+            block_data_flex_editor_upsert_content($rid, $seqFieldId, sprintf('%03d', $seqCounter++));
+        }
 
-        // グループ別カウンタ（groupFieldが設定されている場合）
-        if ($grpFieldId) {
-            if (!isset($groupCounter[$group])) {
-                $groupCounter[$group] = 1;
-            }
-            // grpFieldId への書き込みはしない（groupFieldは読み取り専用）
-            // 区分別カウンタを別フィールドに書く場合は cfg['groupSeqField'] を追加する
+        if ($groupSeqFieldId) {
+            $group = $row['_group'];
+            $groupCounter[$group] = ($groupCounter[$group] ?? 0) + 1;
+            block_data_flex_editor_upsert_content($rid, $groupSeqFieldId,
+                sprintf('%03d', $groupCounter[$group]));
         }
     }
 }
