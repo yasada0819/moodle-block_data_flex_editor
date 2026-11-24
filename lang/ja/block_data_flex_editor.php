@@ -55,3 +55,6 @@ $string['fieldname']      = 'フィールド名';
 $string['fieldtype']      = '型';
 $string['fieldrole']      = '役割';
 $string['nofields']       = 'フィールドが見つかりませんでした。dataid を確認してください。';
+$string['invalidinstance'] = 'このブロックはこのコースに配置されたものではありません。';
+$string['invaliddataid']   = 'データベースIDがブロックの設定と一致しません。';
+$string['invalidentry']    = '自分が作成したエントリ以外、または別のデータベースのエントリが含まれているため保存できませんでした。';

@@ -52,3 +52,6 @@ $string['fieldname']      = 'Field name';
 $string['fieldtype']      = 'Type';
 $string['fieldrole']      = 'Role';
 $string['nofields']       = 'No fields found. Please check the dataid.';
+$string['invalidinstance'] = 'This block instance does not belong to this course.';
+$string['invaliddataid']   = 'The database ID does not match this block\'s configuration.';
+$string['invalidentry']    = 'Some entries could not be saved because they do not belong to you or to this database.';
