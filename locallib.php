@@ -2,6 +2,73 @@
 defined('MOODLE_INTERNAL') || die();
 
 // ---------------------------------------------------------------------------
+// アクセス検証
+// ---------------------------------------------------------------------------
+
+/**
+ * ブロックインスタンスを取得し、このプラグインのブロックで、かつ指定コースに
+ * 配置されたものであることを確認する。
+ *
+ * URL パラメータの instanceid を別コース・別ブロックのものに差し替えて
+ * 権限チェックをすり抜けることを防ぐ。
+ *
+ * @param int $instanceid
+ * @param int $courseid
+ * @return array [stdClass $blockinstance, stdClass $blockcfg]
+ * @throws moodle_exception
+ */
+function block_data_flex_editor_get_instance(int $instanceid, int $courseid): array {
+    global $DB;
+
+    $blockinstance = $DB->get_record('block_instances', ['id' => $instanceid], '*', MUST_EXIST);
+    $coursecontext = context_course::instance($courseid);
+
+    if ($blockinstance->blockname !== 'data_flex_editor'
+            || (int)$blockinstance->parentcontextid !== (int)$coursecontext->id) {
+        throw new moodle_exception('invalidinstance', 'block_data_flex_editor');
+    }
+
+    $blockcfg = !empty($blockinstance->configdata)
+        ? unserialize(base64_decode($blockinstance->configdata))
+        : new stdClass();
+    if (!is_object($blockcfg)) {
+        $blockcfg = new stdClass();
+    }
+
+    return [$blockinstance, $blockcfg];
+}
+
+/**
+ * 更新・削除対象のエントリがすべて「指定 dataid かつ指定ユーザー作成」であることを確認する。
+ *
+ * エディタの一覧表示は userid で絞り込んでいるが、保存時に送られてくる entryId は
+ * クライアント側で書き換え可能なため、サーバー側で改めて所有者を検証する。
+ *
+ * @param int   $dataid
+ * @param int   $userid
+ * @param int[] $entryids
+ * @throws moodle_exception 1件でも条件を満たさないエントリがあれば例外
+ */
+function block_data_flex_editor_require_owned_entries(int $dataid, int $userid, array $entryids): void {
+    global $DB;
+
+    $entryids = array_values(array_unique(array_map('intval', $entryids)));
+    if (empty($entryids)) {
+        return;
+    }
+
+    list($insql, $params) = $DB->get_in_or_equal($entryids, SQL_PARAMS_NAMED);
+    $params['dataid'] = $dataid;
+    $params['userid'] = $userid;
+    $count = $DB->count_records_select('data_records',
+        "id $insql AND dataid = :dataid AND userid = :userid", $params);
+
+    if ($count !== count($entryids)) {
+        throw new moodle_exception('invalidentry', 'block_data_flex_editor');
+    }
+}
+
+// ---------------------------------------------------------------------------
 // フィールドメタデータ
 // ---------------------------------------------------------------------------
 
@@ -177,6 +244,18 @@ function block_data_flex_editor_save_entries(
     $fmeta = block_data_flex_editor_get_fields($dataid);
     $allfields = array_merge($fixedFields, $moveFields);
 
+    // --- 所有者チェック（書き込み前にまとめて検証） ---
+    $targetids = [];
+    foreach ($payload['deletes'] ?? [] as $del) {
+        $targetids[] = (int)($del['entryId'] ?? 0);
+    }
+    foreach ($payload['updates'] ?? [] as $upd) {
+        $targetids[] = (int)($upd['entryId'] ?? 0);
+    }
+    block_data_flex_editor_require_owned_entries($dataid, $userid, $targetids);
+
+    $transaction = $DB->start_delegated_transaction();
+
     // --- 削除 ---
     foreach ($payload['deletes'] ?? [] as $del) {
         $eid = (int)$del['entryId'];
@@ -210,6 +289,8 @@ function block_data_flex_editor_save_entries(
     if (!empty($payload['renumber']) && !empty($renumberCfg['seqField'])) {
         block_data_flex_editor_renumber($dataid, $userid, $fm, $fmeta, $renumberCfg);
     }
+
+    $transaction->allow_commit();
 }
 
 /**

@@ -2,7 +2,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'block_data_flex_editor';
-$plugin->version   = 2026110500;
+$plugin->version   = 2026112400;
 $plugin->requires  = 2022041900; // Moodle 4.0
 $plugin->maturity  = MATURITY_ALPHA;
-$plugin->release   = '0.1.0';
+$plugin->release   = '0.1.1';

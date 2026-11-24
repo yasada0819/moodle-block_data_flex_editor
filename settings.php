@@ -23,11 +23,8 @@ $PAGE->set_course($course);
 $PAGE->set_title(get_string('fieldsettings', 'block_data_flex_editor'));
 $PAGE->set_heading($course->fullname);
 
-// ブロック設定を取得
-$blockinstance = $DB->get_record('block_instances', ['id' => $instanceid], '*', MUST_EXIST);
-$blockcfg = !empty($blockinstance->configdata)
-    ? unserialize(base64_decode($blockinstance->configdata))
-    : new stdClass();
+// ブロック設定を取得（このコースに置かれた本プラグインのブロックであることも確認）
+list($blockinstance, $blockcfg) = block_data_flex_editor_get_instance($instanceid, $courseid);
 
 $dataid = isset($blockcfg->dataid) ? (int)$blockcfg->dataid : 0;
 
