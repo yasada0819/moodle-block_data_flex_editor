@@ -19,6 +19,24 @@ class block_data_flex_editor extends block_base {
         return ['all' => true];
     }
 
+    /**
+     * 同じページ（コーストップなど）に複数設置できるようにする。
+     * DBごとにブロックを置き、ブロックタイトルで見分ける運用を想定。
+     */
+    public function instance_allow_multiple(): bool {
+        return true;
+    }
+
+    /**
+     * ブロック設定のタイトルが入っていれば、ブロックの見出しに使う。
+     */
+    public function specialization() {
+        if (!empty($this->config->title)) {
+            $this->title = format_string($this->config->title, true,
+                ['context' => context_block::instance($this->instance->id)]);
+        }
+    }
+
     public function get_content() {
         global $CFG;
 

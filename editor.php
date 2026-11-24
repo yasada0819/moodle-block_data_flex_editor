@@ -27,7 +27,9 @@ $PAGE->set_heading($course->fullname);
 list($blockinstance, $blockcfg) = block_data_flex_editor_get_instance($instanceid, $courseid);
 
 // URL の dataid がブロック設定の対象データベースと一致することを確認
-if (empty($blockcfg->dataid) || (int)$blockcfg->dataid !== $dataid) {
+// かつ、そのデータベースがこのコースのものであることを確認
+if (empty($blockcfg->dataid) || (int)$blockcfg->dataid !== $dataid
+        || !$DB->record_exists('data', ['id' => $dataid, 'course' => $courseid])) {
     throw new moodle_exception('invaliddataid', 'block_data_flex_editor');
 }
 

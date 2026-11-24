@@ -6,7 +6,8 @@ defined('MOODLE_INTERNAL') || die();
 // ---------------------------------------------------------------------------
 
 /**
- * ブロックインスタンスを取得し、このプラグインのブロックで、かつ指定コースに
+ * ブロックインスタンスを取得し、このプラグインのブロックで、かつ指定コース内
+ * （コーストップ、またはコース内のモジュールページなど下位コンテキスト）に
  * 配置されたものであることを確認する。
  *
  * URL パラメータの instanceid を別コース・別ブロックのものに差し替えて
@@ -23,8 +24,15 @@ function block_data_flex_editor_get_instance(int $instanceid, int $courseid): ar
     $blockinstance = $DB->get_record('block_instances', ['id' => $instanceid], '*', MUST_EXIST);
     $coursecontext = context_course::instance($courseid);
 
-    if ($blockinstance->blockname !== 'data_flex_editor'
-            || (int)$blockinstance->parentcontextid !== (int)$coursecontext->id) {
+    if ($blockinstance->blockname !== 'data_flex_editor') {
+        throw new moodle_exception('invalidinstance', 'block_data_flex_editor');
+    }
+    $parentcontext = context::instance_by_id($blockinstance->parentcontextid, IGNORE_MISSING);
+    $incourse = $parentcontext && (
+        (int)$parentcontext->id === (int)$coursecontext->id
+        || strpos($parentcontext->path, $coursecontext->path . '/') === 0
+    );
+    if (!$incourse) {
         throw new moodle_exception('invalidinstance', 'block_data_flex_editor');
     }
 
