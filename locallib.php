@@ -77,6 +77,212 @@ function block_data_flex_editor_require_owned_entries(int $dataid, int $userid, 
 }
 
 // ---------------------------------------------------------------------------
+// 代理編集（他のユーザーのエントリを編集）
+// ---------------------------------------------------------------------------
+
+/**
+ * 他のユーザーのエントリを代理編集できるかを判定する。
+ *
+ * ブロック側の block/data_flex_editor:editothers に加えて、対象データベース側の
+ * mod/data:manageentries（他人のエントリの管理）も持っていることを条件にする。
+ * 「データベース上で他人のエントリを触れる人だけが、このエディタでも代理編集できる」。
+ *
+ * @param context_block $blockctx
+ * @param int           $dataid
+ * @param int           $courseid
+ * @return bool
+ */
+function block_data_flex_editor_can_edit_others(context_block $blockctx, int $dataid, int $courseid): bool {
+    if (!has_capability('block/data_flex_editor:editothers', $blockctx)) {
+        return false;
+    }
+    $cm = get_coursemodule_from_instance('data', $dataid, $courseid, false, IGNORE_MISSING);
+    if (!$cm) {
+        return false;
+    }
+    return has_capability('mod/data:manageentries', context_module::instance($cm->id));
+}
+
+/**
+ * 編集対象ユーザーを確定する。
+ *
+ * - 自分自身：そのまま許可（従来どおり）
+ * - 他のユーザー：代理編集の権限（ブロック＋データベース両方）を要求し、
+ *   削除済みでないこと、かつ「このデータベースにエントリがある」か
+ *   「このコースに登録されている」ことを確認する
+ *
+ * @param int           $userid   0 なら自分
+ * @param context_block $blockctx
+ * @param int           $dataid
+ * @param int           $courseid
+ * @return stdClass  対象ユーザーのレコード
+ * @throws moodle_exception
+ */
+function block_data_flex_editor_resolve_target_user(
+    int $userid, context_block $blockctx, int $dataid, int $courseid
+): stdClass {
+    global $DB, $USER;
+
+    if ($userid === 0 || $userid === (int)$USER->id) {
+        return $USER;
+    }
+
+    if (!block_data_flex_editor_can_edit_others($blockctx, $dataid, $courseid)) {
+        throw new required_capability_exception($blockctx,
+            'block/data_flex_editor:editothers', 'nopermissions', '');
+    }
+
+    $user = $DB->get_record('user', ['id' => $userid, 'deleted' => 0]);
+    if (!$user) {
+        throw new moodle_exception('invaliduser', 'block_data_flex_editor');
+    }
+    $hasentries = $DB->record_exists('data_records', ['dataid' => $dataid, 'userid' => $userid]);
+    if (!$hasentries && !is_enrolled(context_course::instance($courseid), $userid)) {
+        throw new moodle_exception('invaliduser', 'block_data_flex_editor');
+    }
+    return $user;
+}
+
+/**
+ * このデータベースにエントリを持つユーザーの一覧（代理編集のユーザー選択用）。
+ *
+ * @param int $dataid
+ * @return array  [userid => {id, firstname, lastname, ..., username, entrycount, lastmodified}]
+ */
+function block_data_flex_editor_get_entry_owners(int $dataid): array {
+    global $DB;
+
+    $namefields = \core_user\fields::for_name()->get_sql('u', false, '', '', false)->selects;
+    $sql = "SELECT u.id, u.username, {$namefields},
+                   COUNT(r.id) AS entrycount, MAX(r.timemodified) AS lastmodified
+              FROM {data_records} r
+              JOIN {user} u ON u.id = r.userid AND u.deleted = 0
+             WHERE r.dataid = :dataid
+          GROUP BY u.id, u.username, {$namefields}
+          ORDER BY u.username ASC";
+    return $DB->get_records_sql($sql, ['dataid' => $dataid]);
+}
+
+/**
+ * 対象ユーザーのエントリ状態の指紋（楽観ロック用）。
+ *
+ * エディタを開いた時点の指紋をフォームに埋め込み、保存時に取り直して比較する。
+ * エントリの追加・削除・承認状態の変更・内容の変更（本体のデータベース画面からの
+ * 編集を含む）があれば値が変わる。
+ *
+ * @param int $dataid
+ * @param int $userid
+ * @return string  sha1
+ */
+function block_data_flex_editor_get_fingerprint(int $dataid, int $userid): string {
+    global $DB;
+
+    $records = $DB->get_records('data_records', ['dataid' => $dataid, 'userid' => $userid],
+        'id ASC', 'id, timemodified, approved');
+    $buf = '';
+    foreach ($records as $r) {
+        $buf .= "{$r->id}:{$r->timemodified}:{$r->approved};";
+    }
+    if ($records) {
+        list($insql, $params) = $DB->get_in_or_equal(array_keys($records));
+        $contents = $DB->get_recordset_select('data_content', "recordid $insql", $params,
+            'id ASC', 'id, recordid, fieldid, content, content1, content2, content3, content4');
+        foreach ($contents as $c) {
+            $buf .= "|{$c->recordid}:{$c->fieldid}:" . sha1(implode("\x1f", [
+                (string)$c->content, (string)$c->content1, (string)$c->content2,
+                (string)$c->content3, (string)$c->content4,
+            ]));
+        }
+        $contents->close();
+    }
+    return sha1($buf);
+}
+
+/**
+ * 代理編集のユーザー選択画面を出力する（header から footer まで）。
+ *
+ * 一覧：このデータベースにエントリを持つユーザー（エントリ数・最終更新）
+ * 補助：エントリがまだないコース登録ユーザーをプルダウンで選べる（新規科目など）
+ *
+ * @param int   $dataid
+ * @param int   $courseid
+ * @param array $baseparams  dataid / courseid / instanceid
+ */
+function block_data_flex_editor_render_user_selector(int $dataid, int $courseid, array $baseparams): void {
+    global $OUTPUT, $USER;
+
+    $editorurl = '/blocks/data_flex_editor/editor.php';
+    $owners    = block_data_flex_editor_get_entry_owners($dataid);
+
+    echo $OUTPUT->header();
+    echo $OUTPUT->heading(get_string('pluginname', 'block_data_flex_editor'));
+    echo html_writer::tag('p', get_string('selectuser_intro', 'block_data_flex_editor'));
+
+    // 自分のエントリ
+    echo html_writer::div(html_writer::link(
+        new moodle_url($editorurl, $baseparams + ['userid' => $USER->id]),
+        get_string('editmyentries', 'block_data_flex_editor'),
+        ['class' => 'btn btn-secondary btn-sm']
+    ), 'mb-3');
+
+    // エントリを持つユーザーの一覧
+    if ($owners) {
+        $table = new html_table();
+        $table->attributes['class'] = 'generaltable dfe-user-table';
+        $table->head = [
+            get_string('fullnameuser'),
+            get_string('username'),
+            get_string('entrycount', 'block_data_flex_editor'),
+            get_string('lastmodified'),
+            '',
+        ];
+        foreach ($owners as $u) {
+            $table->data[] = [
+                s(fullname($u)),
+                s($u->username),
+                (int)$u->entrycount,
+                $u->lastmodified ? userdate($u->lastmodified, get_string('strftimedatetimeshort')) : '—',
+                html_writer::link(
+                    new moodle_url($editorurl, $baseparams + ['userid' => $u->id]),
+                    get_string('editthisuser', 'block_data_flex_editor'),
+                    ['class' => 'btn btn-primary btn-sm']
+                ),
+            ];
+        }
+        echo html_writer::table($table);
+    } else {
+        echo $OUTPUT->notification(get_string('noowners', 'block_data_flex_editor'),
+            \core\output\notification::NOTIFY_INFO, false);
+    }
+
+    // エントリがまだないコース登録ユーザー
+    $enrolled = get_enrolled_users(context_course::instance($courseid), '', 0,
+        'u.id, u.username, ' . \core_user\fields::for_name()->get_sql('u', false, '', '', false)->selects,
+        'u.username ASC');
+    $options = [];
+    foreach ($enrolled as $u) {
+        if (!isset($owners[$u->id]) && (int)$u->id !== (int)$USER->id) {
+            $options[$u->id] = fullname($u) . ' (' . $u->username . ')';
+        }
+    }
+    if ($options) {
+        echo $OUTPUT->heading(get_string('otherusers', 'block_data_flex_editor'), 4, 'mt-4');
+        echo html_writer::start_tag('form', ['method' => 'get', 'action' => (new moodle_url($editorurl))->out(false),
+            'class' => 'form-inline']);
+        foreach ($baseparams as $k => $v) {
+            echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => $k, 'value' => $v]);
+        }
+        echo html_writer::select($options, 'userid', '', ['' => get_string('choosedots')],
+            ['class' => 'custom-select mr-2', 'required' => 'required']);
+        echo html_writer::empty_tag('input', ['type' => 'submit', 'class' => 'btn btn-secondary btn-sm',
+            'value' => get_string('editthisuser', 'block_data_flex_editor')]);
+        echo html_writer::end_tag('form');
+    }
+
+    echo $OUTPUT->footer();
+}
+
+// ---------------------------------------------------------------------------
 // フィールドメタデータ
 // ---------------------------------------------------------------------------
 
@@ -244,12 +450,15 @@ function block_data_flex_editor_get_menu_options(int $dataid, string $fieldname)
  * @param array $moveFields    移動列フィールド名リスト
  * @param array $renumberCfg  {seqField, groupField, sortFields:[]}
  * @param int   $textformat
+ * @param string|null $expectedfp  エディタを開いた時点の指紋。null なら同時編集チェックをしない
+ * @return bool  false = 同時編集を検知したため保存しなかった
  */
 function block_data_flex_editor_save_entries(
     int $dataid, array $payload, int $userid,
     array $fixedFields, array $moveFields,
-    array $renumberCfg, int $textformat = FORMAT_PLAIN
-): void {
+    array $renumberCfg, int $textformat = FORMAT_PLAIN,
+    ?string $expectedfp = null
+): bool {
     global $DB;
 
     $fm    = block_data_flex_editor_get_fieldmap($dataid);
@@ -267,6 +476,14 @@ function block_data_flex_editor_save_entries(
     block_data_flex_editor_require_owned_entries($dataid, $userid, $targetids);
 
     $transaction = $DB->start_delegated_transaction();
+
+    // --- 同時編集チェック（楽観ロック） ---
+    // 開いてから保存するまでに、本人・他の編集者・本体画面のいずれかで変更があれば保存しない
+    if ($expectedfp !== null
+            && !hash_equals(block_data_flex_editor_get_fingerprint($dataid, $userid), $expectedfp)) {
+        $transaction->allow_commit();
+        return false;
+    }
 
     // --- 削除 ---
     foreach ($payload['deletes'] ?? [] as $del) {
@@ -304,6 +521,7 @@ function block_data_flex_editor_save_entries(
     }
 
     $transaction->allow_commit();
+    return true;
 }
 
 /**
