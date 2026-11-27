@@ -6,18 +6,22 @@ $dataid     = required_param('dataid',     PARAM_INT);
 $courseid   = required_param('courseid',   PARAM_INT);
 $instanceid = required_param('instanceid', PARAM_INT);
 $action     = optional_param('action', 'edit', PARAM_ALPHA);
+$userid     = optional_param('userid', 0, PARAM_INT);   // 代理編集の対象（0 = 未選択／自分）
 
 $course  = $DB->get_record('course', ['id' => $courseid], '*', MUST_EXIST);
 $context = context_course::instance($courseid);
 
 require_login($course);
-require_capability('block/data_flex_editor:edit', context_block::instance($instanceid));
+$blockctx = context_block::instance($instanceid);
+require_capability('block/data_flex_editor:edit', $blockctx);
 
-$PAGE->set_url('/blocks/data_flex_editor/editor.php', [
+$baseparams = [
     'dataid'     => $dataid,
     'courseid'   => $courseid,
     'instanceid' => $instanceid,
-]);
+];
+$PAGE->set_url('/blocks/data_flex_editor/editor.php',
+    $userid ? $baseparams + ['userid' => $userid] : $baseparams);
 $PAGE->set_context($context);
 $PAGE->set_course($course);
 $PAGE->set_title(get_string('pluginname', 'block_data_flex_editor'));
@@ -32,6 +36,22 @@ if (empty($blockcfg->dataid) || (int)$blockcfg->dataid !== $dataid
         || !$DB->record_exists('data', ['id' => $dataid, 'course' => $courseid])) {
     throw new moodle_exception('invaliddataid', 'block_data_flex_editor');
 }
+
+// ---------------------------------------------------------------------------
+// 編集対象ユーザーの決定（代理編集）
+// ---------------------------------------------------------------------------
+$caneditothers = block_data_flex_editor_can_edit_others($blockctx, $dataid, $courseid);
+
+// 代理編集できる人で対象が未選択なら、まずユーザー選択画面を出す
+if ($caneditothers && $userid === 0) {
+    block_data_flex_editor_render_user_selector($dataid, $courseid, $baseparams);
+    exit;
+}
+
+$targetuser   = block_data_flex_editor_resolve_target_user($userid, $blockctx, $dataid, $courseid);
+$targetuserid = (int)$targetuser->id;
+$isproxy      = $targetuserid !== (int)$USER->id;
+$editorparams = $baseparams + ['userid' => $targetuserid];
 
 $fixedFieldsCsv  = $blockcfg->fixed_fields    ?? '';
 $moveFieldsCsv   = $blockcfg->move_fields     ?? '';
@@ -62,18 +82,23 @@ $fmeta    = block_data_flex_editor_get_fields($dataid);
 if ($action === 'save' && confirm_sesskey()) {
     $payload = json_decode(required_param('updates', PARAM_RAW), true);
     if ($payload) {
-        block_data_flex_editor_save_entries(
-            $dataid, $payload, $USER->id,
+        $expectedfp = required_param('fingerprint', PARAM_ALPHANUM);
+        $ok = block_data_flex_editor_save_entries(
+            $dataid, $payload, $targetuserid,
             $fixedFields, $moveFields,
-            $renumberCfg, $textformat
+            $renumberCfg, $textformat, $expectedfp
         );
+        if (!$ok) {
+            redirect(
+                new moodle_url('/blocks/data_flex_editor/editor.php', $editorparams),
+                get_string('conflict', 'block_data_flex_editor'),
+                null,
+                \core\output\notification::NOTIFY_ERROR
+            );
+        }
     }
     redirect(
-        new moodle_url('/blocks/data_flex_editor/editor.php', [
-            'dataid'     => $dataid,
-            'courseid'   => $courseid,
-            'instanceid' => $instanceid,
-        ]),
+        new moodle_url('/blocks/data_flex_editor/editor.php', $editorparams),
         get_string('saved', 'block_data_flex_editor'),
         null,
         \core\output\notification::NOTIFY_SUCCESS
@@ -88,7 +113,8 @@ $seqRelated  = array_values(array_unique(array_filter(array_merge(
 $extraFields = array_values(array_diff($seqRelated, $allFields));
 
 // エントリ取得
-$entries = block_data_flex_editor_get_entries($dataid, $USER->id, $sortField,
+$fingerprint = block_data_flex_editor_get_fingerprint($dataid, $targetuserid);
+$entries = block_data_flex_editor_get_entries($dataid, $targetuserid, $sortField,
     array_merge($allFields, $extraFields));
 
 // menu型の選択肢をまとめて取得
@@ -163,6 +189,25 @@ $entriesJson = json_encode($entriesJs);
 
 echo $OUTPUT->header();
 echo $OUTPUT->heading(get_string('pluginname', 'block_data_flex_editor'));
+
+// 代理編集できる人には、いま誰のデータを編集しているかを常に表示する（取り違え防止）
+if ($caneditothers) {
+    $a = (object)[
+        'fullname' => fullname($targetuser),
+        'username' => $targetuser->username,
+    ];
+    $msg = $isproxy
+        ? get_string('editingfor', 'block_data_flex_editor', $a)
+        : get_string('editingself', 'block_data_flex_editor');
+    $msg .= ' ' . html_writer::link(
+        new moodle_url('/blocks/data_flex_editor/editor.php', $baseparams),
+        get_string('changeuser', 'block_data_flex_editor'),
+        ['class' => 'btn btn-sm btn-outline-secondary ml-2']
+    );
+    echo $OUTPUT->notification($msg,
+        $isproxy ? \core\output\notification::NOTIFY_WARNING : \core\output\notification::NOTIFY_INFO,
+        false);
+}
 ?>
 
 <style>
@@ -266,6 +311,8 @@ echo $OUTPUT->heading(get_string('pluginname', 'block_data_flex_editor'));
   <input type="hidden" name="dataid"   value="<?php echo $dataid; ?>">
   <input type="hidden" name="courseid" value="<?php echo $courseid; ?>">
   <input type="hidden" name="instanceid" value="<?php echo $instanceid; ?>">
+  <input type="hidden" name="userid"   value="<?php echo $targetuserid; ?>">
+  <input type="hidden" name="fingerprint" value="<?php echo s($fingerprint); ?>">
   <input type="hidden" name="sesskey"  value="<?php echo sesskey(); ?>">
   <input type="hidden" name="updates"  id="dfe-updates-input">
 </form>
